@@ -2,17 +2,11 @@
 
     python -m targetscout.eval.harness          # run + print metrics
     python -m targetscout.eval.harness --ci      # exit non-zero if below thresholds
-
-For each golden question we:
-  1. retrieve evidence chunks (your Phase 2 retriever),
-  2. have an LLM answer using ONLY that evidence (a grounded RAG answer),
-  3. have an LLM *judge* score how faithful + relevant that answer is.
-
-Needs an LLM key in .env (ANTHROPIC_API_KEY or OPENAI_API_KEY).
 """
 from __future__ import annotations
 import argparse
 import json
+import os
 import re
 import sys
 from pathlib import Path
@@ -24,13 +18,27 @@ GOLDEN = Path(__file__).parent / "golden" / "qa_seed.jsonl"
 
 
 def _llm(prompt: str, max_tokens: int = 700) -> str:
-    """Send a prompt to whichever LLM key is configured; return the text reply."""
+    """Send a prompt to whichever LLM is configured; return the text reply.
+
+    Priority: 1) LLM_BASE_URL (free: Ollama/Groq)  2) Anthropic  3) OpenAI.
+    """
+    base_url = os.getenv("LLM_BASE_URL")
+    if base_url:
+        from openai import OpenAI
+        client = OpenAI(base_url=base_url, api_key=os.getenv("LLM_API_KEY", "not-needed"))
+        r = client.chat.completions.create(
+            model=os.getenv("LLM_MODEL", "llama3.1"),
+            messages=[{"role": "user", "content": prompt}],
+            max_tokens=max_tokens,
+        )
+        return r.choices[0].message.content
+
     env = settings()["env"]
     if env.get("anthropic_api_key"):
         import anthropic
         client = anthropic.Anthropic(api_key=env["anthropic_api_key"])
         msg = client.messages.create(
-            model="claude-3-5-haiku-latest",           # cheap; change if it errors
+            model="claude-haiku-4-5-20251001",
             max_tokens=max_tokens,
             messages=[{"role": "user", "content": prompt}],
         )
@@ -39,21 +47,20 @@ def _llm(prompt: str, max_tokens: int = 700) -> str:
         from openai import OpenAI
         client = OpenAI(api_key=env["openai_api_key"])
         r = client.chat.completions.create(
-            model="gpt-4o-mini",                        # cheap; change if it errors
+            model="gpt-4o-mini",
             messages=[{"role": "user", "content": prompt}],
+            max_tokens=max_tokens,
         )
         return r.choices[0].message.content
-    raise RuntimeError("No LLM key found. Add ANTHROPIC_API_KEY or OPENAI_API_KEY to .env")
+    raise RuntimeError("No LLM configured. Set LLM_BASE_URL (free) or an API key in .env")
 
 
 def _score(text: str) -> float:
-    """Pull the first 0..1 number out of the judge's reply."""
-    m = re.search(r"(0(?:\.\d+)?|1(?:\.0+)?)", text)
+    m = re.search(r"(0(?:\.\d+)?|1(?:\.0+)?)", text or "")
     return float(m.group(1)) if m else 0.0
 
 
 def rag_answer(question: str):
-    """Retrieve evidence, then answer using ONLY that evidence."""
     evidence = retrieve(question)
     context = "\n\n".join(f"[{e.pmid}] {e.text}" for e in evidence)
     prompt = (
