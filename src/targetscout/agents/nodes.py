@@ -4,6 +4,7 @@ from functools import lru_cache
 from pathlib import Path
 
 from targetscout.data import chembl, uniprot
+from targetscout.llm import complete
 
 MODELS_DIR = Path("artifacts/admet")
 CLASSIFICATION = {"hERG", "DILI", "BBB_Martins"}
@@ -72,7 +73,6 @@ def evidence_retriever(state: dict) -> dict:
 
 
 def safety_checker(state: dict) -> dict:
-    """Flag candidates over risk thresholds and rank them safest-first."""
     admet = state.get("admet", {})
     flagged = {}
     for smi, preds in admet.items():
@@ -90,7 +90,33 @@ def safety_checker(state: dict) -> dict:
 
 
 def synthesizer(state: dict) -> dict:
-    return {"report": "TODO: synthesized cited report", "confidence": 1.0}
+    """Write a concise, cited triage report from everything gathered."""
+    protein = state.get("protein", {})
+    admet = state.get("admet", {})
+    safety = state.get("safety", {})
+    evidence = state.get("evidence", [])
+    ranked = state.get("ranked", [])[:5]
+
+    cand_block = "\n".join(
+        f"- {smi}\n    predictions: {admet.get(smi)}\n    flags: {', '.join(safety.get(smi) or ['none'])}"
+        for smi in ranked
+    ) or "(no candidates scored)"
+    ev_block = "\n".join(f"[{e['pmid']}] {e['title']}" for e in evidence) or "(no evidence)"
+    gene = (protein.get("genes") or ["?"])[0]
+
+    prompt = (
+        f"You are a drug-discovery triage assistant. Target: {protein.get('name')} ({gene}).\n\n"
+        f"Top candidate molecules (ranked safest-first), with predicted ADMET and safety flags:\n"
+        f"{cand_block}\n\n"
+        f"Supporting literature (cite as [PMID]):\n{ev_block}\n\n"
+        "Write a concise report with: (1) a 2-3 sentence summary, (2) the top 3 candidates and "
+        "their key predicted risks, (3) safety themes from the literature with [PMID] citations."
+    )
+    try:
+        report = complete(prompt, max_tokens=800)
+    except Exception as e:
+        report = f"(report generation failed: {type(e).__name__})"
+    return {"report": report, "confidence": 1.0}
 
 
 def needs_more_evidence(state: dict) -> str:
