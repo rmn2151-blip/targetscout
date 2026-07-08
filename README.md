@@ -40,15 +40,7 @@ For a given target, a **LangGraph** agent runs a 6-step pipeline:
 
 Using the eval harness, I diagnosed a retrieval-coverage gap and expanded the literature corpus, **raising faithfulness from 0.19 → 0.79**.
 
-## Architecturetarget ──▶ Planner ──▶ Target Resolver ──▶ Candidate Retriever
-│
-Evidence Retriever ◀───────┤
-(PubMed → pgvector)         ▼
-│          Property Predictor
-▼          (ADMET ML models)
-Safety Checker ──▶ Synthesizer ──▶ cited report
-▲   │
-└───┘ reflection loop## Tech stack
+## Architecture ![TargetScout architecture](docs/architecture.svg)
 
 - **Agents:** LangGraph · LangChain / LlamaIndex
 - **Retrieval:** pgvector (Postgres) · PubMedBERT embeddings · cross-encoder reranker
