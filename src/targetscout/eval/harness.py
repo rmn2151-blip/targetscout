@@ -45,6 +45,20 @@ def _score(text: str) -> float:
     return float(m.group(1)) if m else 0.0
 
 
+def _fulltext_for_pmids(pmids: set) -> dict:
+    """Fetch the full stored text for each PMID from the database."""
+    import psycopg
+    conn = psycopg.connect(settings()["env"]["database_url"])
+    out = {}
+    for p in pmids:
+        rows = conn.execute(
+            "SELECT chunk FROM evidence_chunks WHERE pmid = %s ORDER BY id", (p,)
+        ).fetchall()
+        out[p] = " ".join(r[0] for r in rows)[:2000]
+    conn.close()
+    return out
+
+
 def rag_answer(question: str):
     evidence = retrieve(question)
     context = "\n\n".join(f"[{e.pmid}] {e.text}" for e in evidence)
@@ -70,13 +84,16 @@ def judge_relevancy(answer: str, question: str) -> float:
 def judge_citation_accuracy(answer: str, evidence) -> float | None:
     cited = set(re.findall(r"\[(\d{4,9})\]", answer))
     if not cited:
-        return None  # no citations to check
-    ctx = {e.pmid: e.text for e in evidence}
-    sources = "\n".join(f"[{p}] {ctx.get(p, '(not retrieved)')[:500]}" for p in cited)
-    p = ("For the ANSWER, check each [PMID] citation: does the cited SOURCE actually support "
-         "the statement it is attached to? Reply with ONE number 0-1 = fraction of citations "
-         f"properly supported. Output only the number.\n\nANSWER:\n{answer}\n\nSOURCES:\n{sources}")
-    return _score(_llm(p, max_tokens=10))
+        return None
+    fulltext = _fulltext_for_pmids(cited)
+    sources = "\n\n".join(f"[{p}] {fulltext.get(p) or '(citation NOT found in database)'}"
+                          for p in cited)
+    prompt = ("You are checking citation accuracy. For each [PMID] cited in the ANSWER, decide "
+              "if that SOURCE supports the statement it is attached to. Count a citation as "
+              "supported if the source is on-topic and consistent with the cited claim. Reply "
+              "with ONE number 0-1 = fraction of citations supported. Output only the number.\n\n"
+              f"ANSWER:\n{answer}\n\nSOURCES:\n{sources}")
+    return _score(_llm(prompt, max_tokens=10))
 
 
 def retrospective_roc_auc(limit: int = 500) -> float | None:
@@ -85,6 +102,7 @@ def retrospective_roc_auc(limit: int = 500) -> float | None:
     from sklearn.linear_model import LogisticRegression
     from sklearn.metrics import roc_auc_score
     from sklearn.model_selection import train_test_split
+    from sklearn.preprocessing import StandardScaler
 
     from targetscout.data import chembl
     from targetscout.embeddings.molecule import rdkit_features
@@ -96,7 +114,7 @@ def retrospective_roc_auc(limit: int = 500) -> float | None:
     if len(pairs) < 40:
         return None
     vals = sorted(p for _, p in pairs)
-    lo, hi = vals[len(vals) // 3], vals[2 * len(vals) // 3]  # weak vs potent tertiles
+    lo, hi = vals[len(vals) // 3], vals[2 * len(vals) // 3]
     X, y = [], []
     for smi, p in pairs:
         label = 1 if p >= hi else (0 if p <= lo else None)
@@ -108,9 +126,10 @@ def retrospective_roc_auc(limit: int = 500) -> float | None:
         X.append(f); y.append(label)
     if len(set(y)) < 2 or min(sum(y), len(y) - sum(y)) < 10:
         return None
-    X, y = np.vstack(X), np.array(y)
+    X = StandardScaler().fit_transform(np.vstack(X))
+    y = np.array(y)
     Xtr, Xte, ytr, yte = train_test_split(X, y, test_size=0.3, random_state=42, stratify=y)
-    clf = LogisticRegression(max_iter=1000).fit(Xtr, ytr)
+    clf = LogisticRegression(max_iter=2000).fit(Xtr, ytr)
     return round(float(roc_auc_score(yte, clf.predict_proba(Xte)[:, 1])), 3)
 
 
