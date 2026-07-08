@@ -1,5 +1,5 @@
 # 🧬 TargetScout
-
+![CI](https://github.com/rmn2151-blip/targetscout/actions/workflows/eval.yml/badge.svg)
 **An AI hit-triage copilot for early-stage drug discovery.**
 
 Given a protein target (or a disease that maps to targets), TargetScout produces a ranked, **evidence-backed** shortlist of candidate small molecules — with predicted ADMET / safety flags and **cited** literature rationale — using a multi-agent RAG pipeline over real public bioactivity and biomedical-literature data.
