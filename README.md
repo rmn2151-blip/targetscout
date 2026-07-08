@@ -1,92 +1,103 @@
 # 🧬 TargetScout
+
 ![CI](https://github.com/rmn2151-blip/targetscout/actions/workflows/eval.yml/badge.svg)
+
 **An AI hit-triage copilot for early-stage drug discovery.**
 
-Given a protein target (or a disease that maps to targets), TargetScout produces a ranked, **evidence-backed** shortlist of candidate small molecules — with predicted ADMET / safety flags and **cited** literature rationale — using a multi-agent RAG pipeline over real public bioactivity and biomedical-literature data.
+Give TargetScout a protein target (e.g. `EGFR` / UniProt `P00533`) and it returns a ranked, **evidence-backed** shortlist of candidate molecules — with predicted ADMET/safety liabilities and **cited** literature rationale — using a multi-agent RAG pipeline over real public bioactivity and biomedical-literature data.
 
-> Portfolio project demonstrating production AI-engineering patterns: RAG, multi-agent orchestration (LangGraph), trained ML models (ADMET), rigorous evaluation, and LLMOps.
+> A portfolio project demonstrating production AI-engineering patterns end to end: trained ML models, retrieval-augmented generation, multi-agent orchestration, rigorous evaluation, and LLMOps.
 
 ---
 
-## Architecture
+## Demo
 
-```
-                         ┌──────────────┐
-   user query  ───────▶  │   Planner    │
-   (target/disease)      └──────┬───────┘
-                                │
-        ┌───────────────────────┼───────────────────────────┐
-        ▼                       ▼                             ▼
- ┌─────────────┐        ┌───────────────┐            ┌────────────────┐
- │Target Resolver│      │Candidate Retriever│         │Evidence Retriever│
- │(UniProt/OpenT)│      │  (ChEMBL/PubChem) │         │ (PubMed → pgvector)│
- └──────┬───────┘       └───────┬────────┘            └────────┬───────┘
-        │                       ▼                              │
-        │              ┌────────────────┐                      │
-        └────────────▶ │Property Predictor│◀────────────────────┘
-                       │ (ADMET tabular ML)│
-                       └───────┬─────────┘
-                               ▼
-                       ┌───────────────┐      reflection / re-retrieval loop
-                       │ Safety Checker │◀───────────────┐
-                       └───────┬────────┘                │
-                               ▼                         │
-                       ┌───────────────┐                 │
-                       │  Synthesizer   │─── low conf ────┘
-                       │ (cited report) │
-                       └───────────────┘
-```
+> _Add a screenshot or a 2-minute Loom link here._ Run `make ui`, enter `P00533`, and record the cited report it generates.
 
-## Tech stack
+## What it does
+
+For a given target, a **LangGraph** agent runs a 6-step pipeline:
+
+1. **Resolve** the target (UniProt).
+2. **Retrieve** known bioactive compounds (ChEMBL).
+3. **Predict** ADMET properties for each candidate with trained ML models.
+4. **Retrieve** supporting literature (PubMed → pgvector semantic search + reranking).
+5. **Flag** safety liabilities (hERG, DILI, solubility) and rank candidates safest-first.
+6. **Synthesize** a concise, `[PMID]`-cited triage report with an LLM.
+
+## Key results
+
+| Component | Metric | Score |
+|---|---|---|
+| ADMET — hERG cardiotoxicity | ROC-AUC | **0.84** |
+| ADMET — drug-induced liver injury (DILI) | ROC-AUC | **0.93** |
+| ADMET — blood-brain-barrier penetration | ROC-AUC | **0.88** |
+| ADMET — lipophilicity | MAE | **0.57** |
+| RAG answer faithfulness (literature QA) | RAGAS-style judge | **0.79** |
+| RAG answer relevancy | LLM judge | **0.80** |
+| Citation accuracy | LLM judge | **0.63** |
+| Retrospective potency ranking (held-out ChEMBL) | ROC-AUC | **0.93** |
+
+Using the eval harness, I diagnosed a retrieval-coverage gap and expanded the literature corpus, **raising faithfulness from 0.19 → 0.79**.
+
+## Architecturetarget ──▶ Planner ──▶ Target Resolver ──▶ Candidate Retriever
+│
+Evidence Retriever ◀───────┤
+(PubMed → pgvector)         ▼
+│          Property Predictor
+▼          (ADMET ML models)
+Safety Checker ──▶ Synthesizer ──▶ cited report
+▲   │
+└───┘ reflection loop## Tech stack
 
 - **Agents:** LangGraph · LangChain / LlamaIndex
-- **Vector store:** pgvector (Postgres) — Pinecone backend behind an interface
-- **Models:** ESM-2 (protein embeddings) · ChemBERTa / RDKit (molecules) · XGBoost/LightGBM ADMET heads · biomedical embedder + cross-encoder reranker · frontier LLM for synthesis
-- **Benchmarks/data:** Therapeutics Data Commons (ADMET) · ChEMBL · BindingDB · PubChem · UniProt · Open Targets · PubMed
-- **Eval:** RAGAS · LLM-as-judge · retrospective ranking (ROC-AUC / enrichment)
-- **LLMOps:** MLflow (model registry) · Langfuse (tracing) · FastAPI + Docker · GitHub Actions CI eval gate
+- **Retrieval:** pgvector (Postgres) · PubMedBERT embeddings · cross-encoder reranker
+- **ML:** scikit-learn / LightGBM ADMET models · RDKit features · trained on Therapeutics Data Commons
+- **LLM:** pluggable (Anthropic / OpenAI / local via OpenAI-compatible endpoint)
+- **Eval:** LLM-as-judge (faithfulness, relevancy, citation accuracy) + retrospective ROC-AUC
+- **LLMOps:** MLflow (experiment tracking) · FastAPI + Docker · Streamlit UI · GitHub Actions CI
+- **Data (all free/public):** ChEMBL · UniProt · PubMed · Open Targets · Therapeutics Data Commons
 
 ## Quickstart
 
 ```bash
-# 1. Environment
-python -m venv .venv && source .venv/bin/activate
-pip install -r requirements.txt
-cp .env.example .env            # add your keys / email
+# 1. Environment (conda recommended for rdkit)
+conda create -n targetscout python=3.12 -y && conda activate targetscout
+pip install -r requirements.txt && pip install -e .
+cp .env.example .env            # add an LLM key (or a free LLM_BASE_URL)
 
-# 2. Postgres + pgvector (for the RAG layer, needed from Phase 2)
+# 2. Database (for the RAG layer)
 docker compose up -d db
 
-# 3. Smoke-test the data APIs (no ML needed)
-make smoke                      # hits ChEMBL, UniProt, Open Targets, PubMed
+# 3. Train the ADMET models
+python -m targetscout.models.admet_train --endpoint hERG   # + DILI, Solubility_AqSolDB, ...
 
-# 4. Train a first ADMET model (Phase 1)
-python -m targetscout.models.admet_train --endpoint hERG
+# 4. Ingest literature, then run the agent
+python scripts/ingest_corpus.py
+make agent TARGET=P00533
 
-# 5. Run the API / UI (later phases)
-make api                        # FastAPI on :8000
-make ui                         # Streamlit
+# 5. Web app
+make api    # FastAPI docs at http://localhost:8000/docs
+make ui     # Streamlit UI
 ```
 
-## Repo layout
+## Evaluation
 
-```
-src/targetscout/
-  data/        # API clients: ChEMBL, UniProt, Open Targets, PubChem, PubMed, TDC loader
-  embeddings/  # ESM-2 protein + molecule featurizers
-  models/      # ADMET tabular training + inference
-  rag/         # pgvector index + retriever + reranker
-  agents/      # LangGraph state graph + nodes
-  eval/        # eval harness, metrics, golden set
-  api/         # FastAPI service
-  app/         # Streamlit UI
-```
+`make eval` scores the pipeline on a 75-question golden set with an LLM-as-judge (faithfulness, relevancy, citation accuracy) plus a retrospective ChEMBL potency-ranking ROC-AUC. Metrics and thresholds live in `config/config.yaml`; GitHub Actions runs tests + lint on every push.
 
-## Build roadmap
-See **`../TargetScout_Project_Spec_and_Roadmap.md`** for the phased 1–3 month plan and resume metrics, and **`../TargetScout_Data_Sources.md`** for API details.
+## Repo layout src/targetscout/
+data/        # API clients: ChEMBL, UniProt, Open Targets, PubMed, TDC
+embeddings/  # ESM-2 protein + RDKit molecule featurizers
+models/      # ADMET tabular training + inference
+rag/         # pgvector ingest + retriever + reranker
+agents/      # LangGraph state graph + nodes
+eval/        # eval harness, metrics, golden set
+api/  app/   # FastAPI service + Streamlit UI ## Limitations & future work
 
-## Status
-🟡 Scaffold — runnable data-API stubs + ADMET trainer skeleton in place. Follow the roadmap phase by phase.
+- Citation precision (0.63) is the weakest metric — a known RAG attribution challenge; would improve with a stronger judge and tighter source-grounding.
+- Data-lookup questions (structured ChEMBL facts) need a dedicated tool, not literature RAG.
+- ADMET models use fingerprint features; graph neural networks would likely improve accuracy.
 
 ## Disclaimer
-Research/educational tool. Predictions are not validated for clinical or safety decisions.
+
+Research/educational tool only. Predictions are **not** validated for clinical, safety, or regulatory use.
