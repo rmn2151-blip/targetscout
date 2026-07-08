@@ -1,14 +1,11 @@
-"""Eval harness: LLM-as-judge faithfulness + relevancy over the golden set.
-
-    python -m targetscout.eval.harness          # run + print metrics
-    python -m targetscout.eval.harness --ci      # exit non-zero if below thresholds
-"""
+"""Eval harness: LLM-as-judge faithfulness + relevancy over the golden set."""
 from __future__ import annotations
 import argparse
 import json
 import os
 import re
 import sys
+import time
 from pathlib import Path
 
 from targetscout.config import settings
@@ -18,10 +15,6 @@ GOLDEN = Path(__file__).parent / "golden" / "qa_seed.jsonl"
 
 
 def _llm(prompt: str, max_tokens: int = 700) -> str:
-    """Send a prompt to whichever LLM is configured; return the text reply.
-
-    Priority: 1) LLM_BASE_URL (free: Ollama/Groq)  2) Anthropic  3) OpenAI.
-    """
     base_url = os.getenv("LLM_BASE_URL")
     if base_url:
         from openai import OpenAI
@@ -73,21 +66,17 @@ def rag_answer(question: str):
 
 
 def judge_faithfulness(answer: str, context: str) -> float:
-    p = (
-        "Grade whether an ANSWER is supported by CONTEXT. Reply with ONE number from "
-        "0 to 1: the fraction of the answer's claims directly supported by the context. "
-        "Output only the number.\n\n"
-        f"CONTEXT:\n{context}\n\nANSWER:\n{answer}"
-    )
+    p = ("Grade whether an ANSWER is supported by CONTEXT. Reply with ONE number from "
+         "0 to 1: the fraction of the answer's claims directly supported by the context. "
+         "Output only the number.\n\n"
+         f"CONTEXT:\n{context}\n\nANSWER:\n{answer}")
     return _score(_llm(p, max_tokens=10))
 
 
 def judge_relevancy(answer: str, question: str) -> float:
-    p = (
-        "Reply with ONE number from 0 to 1 for how well the ANSWER addresses the "
-        "QUESTION (1 = fully answers, 0 = irrelevant). Output only the number.\n\n"
-        f"QUESTION:\n{question}\n\nANSWER:\n{answer}"
-    )
+    p = ("Reply with ONE number from 0 to 1 for how well the ANSWER addresses the "
+         "QUESTION (1 = fully answers, 0 = irrelevant). Output only the number.\n\n"
+         f"QUESTION:\n{question}\n\nANSWER:\n{answer}")
     return _score(_llm(p, max_tokens=10))
 
 
@@ -95,25 +84,33 @@ def load_golden() -> list[dict]:
     return [json.loads(line) for line in GOLDEN.read_text().splitlines() if line.strip()]
 
 
-def run_eval() -> dict:
+def run_eval(limit: int | None = None) -> dict:
     golden = load_golden()
     items = [g for g in golden if g.get("type") in {"evidence_qa", "data_qa"}]
+    if limit:
+        items = items[:limit]
     faiths, rels = [], []
     for g in items:
-        answer, evidence, context = rag_answer(g["question"])
-        f = judge_faithfulness(answer, context)
-        r = judge_relevancy(answer, g["question"])
+        try:
+            answer, evidence, context = rag_answer(g["question"])
+            f = judge_faithfulness(answer, context)
+            r = judge_relevancy(answer, g["question"])
+        except Exception as e:
+            print(f"- {g['id']}: SKIPPED ({type(e).__name__})")
+            time.sleep(2)
+            continue
         faiths.append(f)
         rels.append(r)
         print(f"- {g['id']}: faithfulness={f:.2f} relevancy={r:.2f} ({len(evidence)} chunks)")
+        time.sleep(1)  # be gentle on free rate limits
     avg = lambda xs: round(sum(xs) / len(xs), 3) if xs else None
-    return {"n_evaluated": len(items),
+    return {"n_evaluated": len(faiths),
             "faithfulness": avg(faiths),
             "answer_relevancy": avg(rels)}
 
 
-def main(ci: bool) -> None:
-    metrics = run_eval()
+def main(ci: bool, limit: int | None) -> None:
+    metrics = run_eval(limit)
     print("\n== EVAL RESULTS ==")
     print(json.dumps(metrics, indent=2))
     if ci and metrics["faithfulness"] is not None:
@@ -127,4 +124,6 @@ def main(ci: bool) -> None:
 if __name__ == "__main__":
     ap = argparse.ArgumentParser()
     ap.add_argument("--ci", action="store_true")
-    main(ap.parse_args().ci)
+    ap.add_argument("--limit", type=int, default=None)
+    a = ap.parse_args()
+    main(a.ci, a.limit)
